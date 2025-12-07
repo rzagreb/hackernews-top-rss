@@ -11,7 +11,7 @@ from src.scraper import RssItemsMaker
 logging.basicConfig(level=logging.INFO)
 
 DEFAULT_MIN_POINTS = 100
-DEFAULT_MAX_ITEMS = 10
+DEFAULT_MAX_ITEMS = 15
 
 
 def build_feed(max_items: int, min_points: int) -> str:

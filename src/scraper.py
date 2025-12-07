@@ -77,7 +77,7 @@ class RssItemsMaker:
         oversample = max(max_items * 3, max_items)
         story_ids = story_ids[:oversample]
 
-        stories_with_data: list[Tuple[StoryData, dict]] = []
+        stories_with_data: list[tuple[StoryData, dict]] = []
 
         for order, story_id in enumerate(story_ids):
             result = self._fetch_story_from_api(story_id, order=order)
@@ -85,8 +85,6 @@ class RssItemsMaker:
                 continue
             story, story_data = result
 
-            # We apply the min_points filter later, after optional sorting,
-            # to keep behaviour similar to the previous implementation.
             stories_with_data.append((story, story_data))
 
         if not stories_with_data:
@@ -94,10 +92,7 @@ class RssItemsMaker:
 
         # Sort in memory according to the requested key.
         if sort_by == "points":
-            stories_with_data.sort(
-                key=lambda sd: sd[0].points or 0,
-                reverse=True,
-            )
+            stories_with_data.sort(key=lambda sd: sd[0].points or 0, reverse=True)
         elif sort_by == "published":
             stories_with_data.sort(
                 key=lambda sd: sd[0].published or datetime.datetime.fromtimestamp(0),
@@ -131,7 +126,12 @@ class RssItemsMaker:
                 desc_parts.append(f"<p>{story.description}</p>")
             if story.top_comment:
                 desc_parts.append(
-                    f"<p><strong>Top Comment:</strong> <quote>{story.top_comment}</quote></p>"
+                    f"""
+                    <div><b>Top Comment:</b></div>
+                    <blockquote style="margin:1.5em 0; padding:1em 1.5em; border-left:4px solid #ccc; background-color:#f9f9f9; font-style:italic;">
+                    <p>&ldquo;{story.top_comment}&rdquo;</p>
+                    </blockquote>
+                    """
                 )
             desc_parts.append(
                 f"<hr/>"
@@ -143,8 +143,9 @@ class RssItemsMaker:
             # Prefer the explicit published datetime populated from the API.
             published: Optional[datetime.datetime] = story.published
             if not published and getattr(story, "age_text", None):
-                # Backwards compatible fallback for any older StoryData values
-                published = parse_human_date(story.age_text) or None
+                if story.age_text is not None:
+                    # Backwards compatible fallback for any older StoryData values
+                    published = parse_human_date(story.age_text) or None
 
             rss_items.append(
                 FeedItem(
@@ -200,7 +201,7 @@ class RssItemsMaker:
         self,
         story_id: int,
         order: int,
-    ) -> Optional[Tuple[StoryData, dict]]:
+    ) -> Optional[tuple[StoryData, dict]]:
         """
         Load a story from the Firebase API and build a StoryData instance.
 
