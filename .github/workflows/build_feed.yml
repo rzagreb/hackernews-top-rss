@@ -1,0 +1,56 @@
+name: Build feed
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+  schedule:
+    - cron: "0 10 * * *"  # every day at 10:00 UTC (3 AM PDT)
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        run: |
+          python -m pip install --upgrade pip
+          pip install poetry
+
+      - name: Install dependencies
+        run: |
+          poetry install --no-interaction --no-ansi
+
+      # - name: Run unit tests
+      #   run: |
+      #     poetry run python -m unittest
+
+      - name: Generate feeds
+        run: |
+          poetry run python build_feed.py
+
+      - name: Commit and push feeds
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "rss-bot"
+          git config user.email "rss-bot@users.noreply.github.com"
+          git add feeds/*.xml || echo "Nothing to commit"
+          if git diff --cached --quiet; then
+            echo "No changes in feeds"
+          else
+            git commit -m "Update RSS feeds"
+            git push
+          fi

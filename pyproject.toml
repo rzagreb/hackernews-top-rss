@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "hackernews-top-rss"
+version = "0.1.0"
+description = "Generates RSS feed of top Hacker News stories."
+authors = ["Roman Zagrebnev"]
+readme = "README.md"
+license = "MIT"
+packages = [{ include = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+httpx = "^0.28.1"
+lxml = "^6.0.2"
+python-dateutil = "^2.9.0.post0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
