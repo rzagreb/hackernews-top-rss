@@ -3,10 +3,9 @@ from __future__ import annotations
 import datetime
 import logging
 import re
-from typing import Literal, Optional
+from typing import Literal, Optional, Tuple
 
 import httpx
-from lxml import html
 
 from src.models import FeedItem, StoryData
 from src.rate_limiter import RateLimiter
@@ -14,8 +13,9 @@ from src.utils import arr_get, parse_human_date
 
 log = logging.getLogger(__name__)
 
+
 HEADERS = {
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept": "application/json,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.5",
     "DNT": "1",
     "Connection": "keep-alive",
@@ -31,7 +31,7 @@ HEADERS = {
 
 class RssItemsMaker:
     """
-    Responsible for talking to the remote site (Hacker News today) and
+    Responsible for talking to the remote site (Hacker News) and
     turning the result into a list of FeedItem instances.
 
     The only method that user code should rely on is fetch_feed_items.
@@ -41,16 +41,15 @@ class RssItemsMaker:
 
     def __init__(self, client: Optional[httpx.Client] = None) -> None:
         self.url_base = "https://news.ycombinator.com"
-        self.url_main = (
-            f"{self.url_base}/front?day={datetime.datetime.now().isoformat()[:10]}"
-        )
+        self.api_base = "https://hacker-news.firebaseio.com/v0"
         self._client = client or httpx.Client(
             timeout=10.0,
             follow_redirects=True,
             headers=HEADERS,
         )
 
-        self.rate_limiter = RateLimiter(min_interval_ms=2000.0, start=True)
+        # 1 second between requests by default - polite for the public API
+        self.rate_limiter = RateLimiter(min_interval_ms=1000.0, start=True)
 
     def fetch_feed_items(
         self,
@@ -59,38 +58,75 @@ class RssItemsMaker:
         sort_by: Optional[Literal["points", "published"]] = "points",
     ) -> list[FeedItem]:
         """
-        Fetch stories from the main page and return them as FeedItem objects.
+        Fetch stories from the Hacker News official Firebase API and return
+        them as FeedItem objects.
 
         Args:
             max_items: Maximum number of items to return.
             min_points: Filter out stories that have fewer points than this.
+            sort_by: How to sort the resulting feed.
         """
-        log.info(f"Fetching feed items from {self.url_main}")
-        tree = self._load_page_elements(self.url_main)
-        stories = self._parse_main_page(tree)
-        log.info(f"Found {len(stories)} stories on the main page")
+        log.info("Fetching feed items from Hacker News Firebase API")
 
+        story_ids = self._fetch_top_story_ids()
+        if not story_ids:
+            return []
+
+        # We do not need all 500 ids - take a small oversampling so that
+        # filtering by points still leaves enough items.
+        oversample = max(max_items * 3, max_items)
+        story_ids = story_ids[:oversample]
+
+        stories_with_data: list[Tuple[StoryData, dict]] = []
+
+        for order, story_id in enumerate(story_ids):
+            result = self._fetch_story_from_api(story_id, order=order)
+            if result is None:
+                continue
+            story, story_data = result
+
+            # We apply the min_points filter later, after optional sorting,
+            # to keep behaviour similar to the previous implementation.
+            stories_with_data.append((story, story_data))
+
+        if not stories_with_data:
+            return []
+
+        # Sort in memory according to the requested key.
         if sort_by == "points":
-            stories.sort(key=lambda s: s.points or 0, reverse=True)
+            stories_with_data.sort(
+                key=lambda sd: sd[0].points or 0,
+                reverse=True,
+            )
         elif sort_by == "published":
-            stories.sort(key=lambda s: s.published or 0, reverse=True)
+            stories_with_data.sort(
+                key=lambda sd: sd[0].published or datetime.datetime.fromtimestamp(0),
+                reverse=True,
+            )
 
         rss_items: list[FeedItem] = []
-        for idx, story in enumerate(stories):
-            self.rate_limiter.wait_if_needed()
-            log.info(f"[{idx + 1}/{len(stories)}] {story.title}")
+
+        for idx, (story, story_data) in enumerate(stories_with_data):
+            # Respect the max_items and min_points arguments.
             if len(rss_items) >= max_items:
                 break
 
             if story.points is not None and story.points < min_points:
                 log.info(
-                    f"Skip story '{story.title}' because {story.points} < {min_points} required points"
+                    "Skip story '%s' because %s < %s required points",
+                    story.title,
+                    story.points,
+                    min_points,
                 )
                 continue
 
-            self._try_fetch_story_comment(story)
+            self.rate_limiter.wait_if_needed()
+            log.info("[%s/%s] %s", idx + 1, len(stories_with_data), story.title)
 
-            desc_parts = []
+            # Enrich with description and top comment from the API.
+            self._try_fetch_story_comment(story, story_data=story_data)
+
+            desc_parts: list[str] = []
             if story.description:
                 desc_parts.append(f"<p>{story.description}</p>")
             if story.top_comment:
@@ -104,8 +140,10 @@ class RssItemsMaker:
             )
             description = "".join(desc_parts)
 
-            published: Optional[datetime.datetime] = None
-            if story.age_text:
+            # Prefer the explicit published datetime populated from the API.
+            published: Optional[datetime.datetime] = story.published
+            if not published and getattr(story, "age_text", None):
+                # Backwards compatible fallback for any older StoryData values
                 published = parse_human_date(story.age_text) or None
 
             rss_items.append(
@@ -126,110 +164,153 @@ class RssItemsMaker:
 
         return rss_items
 
-    def _load_page_elements(self, url: str) -> html.HtmlElement:
-        log.info(f"Loading {url}")
-        response = self._client.get(url)
-        response.raise_for_status()
-        return html.fromstring(response.text)
+    # API helpers
+    # ------------------------------------------------------------
 
-    def _parse_main_page(self, tree: html.HtmlElement) -> list[StoryData]:
+    def _fetch_top_story_ids(self) -> list[int]:
         """
-        Parse the Hacker News front page.
+        Return a list of story ids corresponding to the current HN front page.
 
-        The HTML structure is roughly:
-
-        <tr class="athing" id="story-id">
-            ... title row ...
-        </tr>
-        <tr>
-            <td class="subtext">
-                ... score, user, age, comments link ...
-            </td>
-        </tr>
+        This uses the official Firebase API:
+            GET /v0/topstories.json
         """
-        if not isinstance(tree, html.HtmlElement):
-            raise ValueError("tree must be an instance of lxml.html.HtmlElement")
-
-        elems_parent = tree.xpath('..//tr[contains(@class,"athing")]/parent::table')
-        if not elems_parent:
+        url = f"{self.api_base}/topstories.json"
+        log.info("Loading top stories ids from %s", url)
+        try:
+            response = self._client.get(url)
+            response.raise_for_status()
+        except Exception as exc:
+            log.warning("Could not load top stories: %s", exc)
             return []
-        elems_parent = elems_parent[0]
 
-        # Structure: first <tr> is item, second <tr> is subtext, third <tr> is spacer
-        items_data = []
-        _item = None
-        for elem_i, elem in enumerate(elems_parent.findall("tr")):
-            # Skip spacer (appears after first two <tr> of each item)
-            if elem.get("class") == "spacer":
-                _item = None
+        data = response.json()
+        if not isinstance(data, list):
+            log.warning("Unexpected response for topstories: %r", data)
+            return []
+
+        ids: list[int] = []
+        for raw in data:
+            try:
+                ids.append(int(raw))
+            except (TypeError, ValueError):
                 continue
+        return ids
 
-            # Extract all from first <tr> and then move to next
-            elems_title = elem.xpath('.//span[@class="titleline"]/a/text()')
-            if elems_title:
-                _item = StoryData(
-                    title=elems_title[0],
-                    url=elem.xpath('.//span[@class="titleline"]/a/@href')[0],
-                    comments_url=f"{self.url_base}/item?id={elem.get('id')}",
-                    order=elem_i,
-                )
-                continue
-
-            # Extract all from second <tr> and then store item
-            elems_subtext = elem.xpath('.//td[@class="subtext"]')
-            if elems_subtext and _item:
-                points_str = arr_get(elem.xpath('.//span[@class="score"]/text()'))
-                if isinstance(points_str, str):
-                    points_str = re.sub(r" points?$", "", points_str)
-                    _item.points = int(points_str) if points_str else None
-
-                _item.author = arr_get(elem.xpath('.//a[@class="hnuser"]/text()'))
-
-                # extract time from
-                _item.age_text = arr_get(elem.xpath('.//span[@class="age"]/text()'))
-                if _item.age_text:
-                    age_short = _item.age_text[:19]
-                    _item.published = datetime.datetime.fromisoformat(age_short)
-
-                items_data.append(_item)
-                _item = None  # reset for next item
-                continue
-        return items_data
-
-    def _try_fetch_story_comment(self, story: StoryData) -> Optional[str]:
+    def _fetch_story_from_api(
+        self,
+        story_id: int,
+        order: int,
+    ) -> Optional[Tuple[StoryData, dict]]:
         """
-        Load the story comments page and extract the very first comment.
+        Load a story from the Firebase API and build a StoryData instance.
+
+        GET /v0/item/<id>.json
+        """
+        url = f"{self.api_base}/item/{story_id}.json"
+        log.debug("Loading story %s from %s", story_id, url)
+        try:
+            response = self._client.get(url)
+            response.raise_for_status()
+        except Exception as exc:
+            log.warning("Could not load story %s: %s", story_id, exc)
+            return None
+
+        data = response.json() or {}
+        if data.get("type") != "story":
+            # Skip jobs, polls, comments, etc.
+            return None
+
+        title = data.get("title") or f"HN story {story_id}"
+        url_out = data.get("url") or f"{self.url_base}/item?id={story_id}"
+
+        story = StoryData(
+            title=title,
+            url=url_out,
+            comments_url=f"{self.url_base}/item?id={story_id}",
+            order=order,
+        )
+
+        story.points = data.get("score")
+        story.author = data.get("by")
+        timestamp = data.get("time")
+        if isinstance(timestamp, (int, float)):
+            story.published = datetime.datetime.fromtimestamp(timestamp)
+        else:
+            story.published = None
+
+        # For text submissions like Ask HN, HN stores the body in `text`.
+        text_html = data.get("text")
+        if isinstance(text_html, str):
+            story.description = text_html
+
+        return story, data
+
+    def _get_item_json(self, item_id: int) -> Optional[dict]:
+        """
+        Convenience wrapper to load any item (story or comment) from the API.
+        """
+        url = f"{self.api_base}/item/{item_id}.json"
+        log.debug("Loading item %s from %s", item_id, url)
+        try:
+            response = self._client.get(url)
+            response.raise_for_status()
+        except Exception as exc:
+            log.warning("Could not load item %s: %s", item_id, exc)
+            return None
+        return response.json() or {}
+
+    @staticmethod
+    def _extract_item_id_from_url(url: Optional[str]) -> Optional[int]:
+        if not url:
+            return None
+        match = re.search(r"id=(\d+)", url)
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
+
+    def _try_fetch_story_comment(
+        self,
+        story: StoryData,
+        story_data: Optional[dict] = None,
+    ) -> Optional[str]:
+        """
+        Load the story comments through the Firebase API and extract the
+        first comment text, as well as ensuring the story body is filled.
 
         Failures are deliberately swallowed so that a transient network
         issue on one story does not break the whole feed.
         """
-        if not story.comments_url:
-            return None
-
-        print("Loading comments for story:", story.title)
-
-        try:
-            tree = self._load_page_elements(story.comments_url)
-        except Exception as exc:
-            log.warning(f"Could not load comments for '{story.title}': {exc}")
-            return None
-
-        print("Parsing comment page for story:", story.title)
-
-        # Post description (sometimes empty)
-        elems_toptext: list[html.HtmlElement] = tree.xpath('.//div[@class="toptext"]')
-        elem_toptext = arr_get(elems_toptext)
-        if elem_toptext is not None:
-            inner_html: str = "".join(
-                html.tostring(child, method="html", encoding="unicode")
-                for child in elem_toptext.iterchildren()  # type: ignore
+        # Ensure we have the story JSON available.
+        if story_data is None:
+            story_id = self._extract_item_id_from_url(
+                getattr(story, "comments_url", None)
             )
-            story.description = inner_html.strip()
+            if story_id is None:
+                return None
+            story_data = self._get_item_json(story_id)
+            if not story_data:
+                return None
 
-        # Get very first comment
-        elems_comments: list[html.HtmlElement] = tree.xpath(
-            './/table[@class="comment-tree"]//tr/td[@class="default"]//div[contains(@class,"commtext")]'
-        )
-        elem_comment = arr_get(elems_comments)
-        if elem_comment:
-            story.top_comment = elem_comment.text_content().strip()
+        # Populate description from the story body if available.
+        text_html = story_data.get("text")
+        if isinstance(text_html, str) and not getattr(story, "description", None):
+            story.description = text_html
+
+        # Identify the first top-level comment from the kids list.
+        kids = story_data.get("kids") or []
+        first_comment_id = arr_get(kids)
+        if not first_comment_id:
+            return None
+
+        comment_data = self._get_item_json(int(first_comment_id))
+        if not comment_data:
+            return None
+
+        comment_text = comment_data.get("text")
+        if isinstance(comment_text, str):
+            story.top_comment = comment_text
+
+        return story.top_comment
