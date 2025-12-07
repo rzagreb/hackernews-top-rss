@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime
 import logging
 import re
-from typing import Literal, Optional, Tuple
+from typing import Literal, Optional
 
 import httpx
 
