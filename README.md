@@ -1,8 +1,8 @@
 # Website RSS Framework
 
-This is unofficial RSS feed for [Hacker News](https://news.ycombinator.com/).
+This is unofficial RSS feed for [Hacker News](https://news.ycombinator.com/). Official Hacker News RSS: https://news.ycombinator.com/rss
 
-Official Hacker News RSS: https://news.ycombinator.com/rss
+Feed URL: `https://rzagreb.github.io/hackernews-top-rss/feeds/hacker-news.xml`
 
 ## Features
 
