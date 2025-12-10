@@ -5,7 +5,7 @@ on:
     branches: ["main", "master"]
   pull_request:
   schedule:
-    - cron: "0 10 * * *"  # every day at 10:00 UTC (3 AM PDT)
+    - cron: "0 0,5,10,15,20 * * *" # Every 5 hours
   workflow_dispatch:
 
 jobs:
@@ -38,7 +38,7 @@ jobs:
 
       - name: Generate feeds
         run: |
-          poetry run python build_feed.py
+          poetry run python build_feed.py --max-items 15
 
       - name: Commit and push feeds
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
