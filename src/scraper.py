@@ -122,22 +122,26 @@ class RssItemsMaker:
             self._try_fetch_story_comment(story, story_data=story_data)
 
             desc_parts: list[str] = []
+            desc_parts.append(
+                f'<p><strong>Source:</strong> <a href="{story.url}">{story.url_domain()}</a></p>'
+            )
             if story.description:
                 desc_parts.append(f"<p>{story.description}</p>")
             if story.top_comment:
                 desc_parts.append(
                     f"""
+                    <hr/>
                     <div><b>Top Comment:</b></div>
                     <blockquote style="margin:1.5em 0; padding:1em 1.5em; border-left:4px solid #ccc; background-color:#f9f9f9; font-style:italic;">
-                    <p>&ldquo;{story.top_comment}&rdquo;</p>
+                    <p>{story.top_comment}</p>
                     </blockquote>
                     """
                 )
             desc_parts.append(
-                f"<hr/>"
-                f'<p><strong>Source:</strong> <a href="{story.url}">{story.url_domain()}</a></p>'
+                f"<p><strong>Points:</strong> {story.points or 0} | <strong>Author:</strong> {story.author or 'unknown'}</p>"
                 f'<p><a href="{story.comments_url}">View All Comments</a></p>'
             )
+
             description = "".join(desc_parts)
 
             # Prefer the explicit published datetime populated from the API.
