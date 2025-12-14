@@ -108,10 +108,7 @@ class RssItemsMaker:
 
             if story.points is not None and story.points < min_points:
                 log.info(
-                    "Skip story '%s' because %s < %s required points",
-                    story.title,
-                    story.points,
-                    min_points,
+                    f"Skip story '{story.title}' because {story.points} < {min_points} required points"
                 )
                 continue
 
@@ -132,7 +129,7 @@ class RssItemsMaker:
                     f"""
                     <hr/>
                     <div><b>Top Comment:</b></div>
-                    <blockquote style="margin:1.5em 0; padding:1em 1.5em; border-left:4px solid #ccc; background-color:#f9f9f9; font-style:italic;">
+                    <blockquote style="margin:1.5em 0; padding:1em 1.5em; border-left:4px solid; font-style:italic;">
                     <p>{story.top_comment}</p>
                     </blockquote>
                     """
